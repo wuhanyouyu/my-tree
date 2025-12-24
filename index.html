@@ -100,4 +100,149 @@
             const renderPass = new THREE.RenderPass(scene, camera);
             const bloomPass = new THREE.UnrealBloomPass(
                 new THREE.Vector2(window.innerWidth, window.innerHeight), 
-                1.4, 0.45
+                1.4, 0.45, 0.8
+            );
+            bloomPass.threshold = 0.2; 
+            bloomPass.strength = 1.4;
+
+            composer = new THREE.EffectComposer(renderer);
+            composer.addPass(renderPass);
+            composer.addPass(bloomPass);
+
+            // 光照
+            scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+            const sun = new THREE.PointLight(0xffd700, 2.5, 50);
+            sun.position.set(5, 10, 5);
+            scene.add(sun);
+
+            createForest();
+            
+            // 点击交互备用
+            document.getElementById('container').addEventListener('click', toggleMode);
+
+            // 启动渲染循环
+            tick();
+        }
+
+        function createForest() {
+            const count = 220; // 粒子数量
+            for (let i = 0; i < count; i++) {
+                const isSphere = Math.random() > 0.4;
+                const geo = isSphere ? new THREE.SphereGeometry(0.12, 10, 10) : new THREE.BoxGeometry(0.16, 0.16, 0.16);
+                const mat = new THREE.MeshStandardMaterial({ 
+                    color: i % 3 === 0 ? PALETTE.gold : (i % 3 === 1 ? PALETTE.red : PALETTE.leaf),
+                    metalness: 0.9, roughness: 0.1 
+                });
+                const mesh = new THREE.Mesh(geo, mat);
+
+                // 计算圣诞树圆锥坐标
+                const h = Math.random() * 7;
+                const r = (h / 7) * 2.8;
+                const angle = Math.random() * Math.PI * 2;
+                
+                mesh.userData.closePos = new THREE.Vector3(Math.cos(angle)*r, h - 3.5, Math.sin(angle)*r);
+                mesh.userData.openPos = new THREE.Vector3((Math.random()-0.5)*15, (Math.random()-0.5)*15, (Math.random()-0.5)*15);
+                
+                mesh.position.copy(mesh.userData.closePos);
+                mesh.rotation.set(Math.random()*6, Math.random()*6, Math.random()*6);
+                
+                particles.push(mesh);
+                scene.add(mesh);
+            }
+        }
+
+        /**
+         * MediaPipe AI 逻辑
+         */
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424515/${file}`
+        });
+
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.7 });
+        hands.onResults(onResults);
+
+        function onResults(res) {
+            if (!res.multiHandLandmarks || res.multiHandLandmarks.length === 0) return;
+            document.getElementById('msg').innerText = "🖐️ AI 实时监测中...";
+            
+            const lm = res.multiHandLandmarks[0];
+            // 握拳识别
+            const isFist = lm[8].y > lm[6].y && lm[12].y > lm[10].y && lm[16].y > lm[14].y;
+            // 张手识别
+            const isOpen = lm[8].y < lm[5].y && lm[12].y < lm[9].y && lm[20].y < lm[17].y;
+
+            if (isFist) switchState('CLOSE');
+            else if (isOpen) switchState('OPEN');
+
+            // 联动相机旋转 (增加平滑插值防止相机丢失)
+            if (curState === 'OPEN') {
+                const targetX = (lm[9].x - 0.5) * 18;
+                const targetY = -(lm[9].y - 0.5) * 12;
+                camera.position.x += (targetX - camera.position.x) * 0.05;
+                camera.position.y += (targetY - camera.position.y) * 0.05;
+                camera.lookAt(0, 0, 0);
+            }
+        }
+
+        function switchState(state) {
+            if (curState === state) return;
+            curState = state;
+            document.getElementById('msg').innerText = `当前状态: ${state === 'CLOSE' ? '圣诞树收拢' : '星尘炸裂'}`;
+            
+            particles.forEach(p => {
+                const dest = state === 'CLOSE' ? p.userData.closePos : p.userData.openPos;
+                gsap.to(p.position, { x: dest.x, y: dest.y, z: dest.z, duration: 1.6, ease: "expo.out" });
+                gsap.to(p.rotation, { x: Math.random()*10, y: Math.random()*10, duration: 1.6 });
+            });
+
+            if (state === 'CLOSE') {
+                gsap.to(camera.position, { x: 0, y: 2, z: 9, duration: 1.6, ease: "power2.inOut" });
+            }
+        }
+
+        function toggleMode() {
+            switchState(curState === 'CLOSE' ? 'OPEN' : 'CLOSE');
+        }
+
+        // 启动硬件
+        const video = document.getElementById('v-stream');
+        const cam = new Camera(video, {
+            onFrame: async () => { await hands.send({image: video}); },
+            width: 480, height: 360
+        });
+        cam.start().catch(() => { document.getElementById('msg').innerText = "⚠️ 需开启摄像头权限才能手势控"; });
+
+        // 照片云功能
+        document.getElementById('file-up').addEventListener('change', (e) => {
+            Array.from(e.target.files).forEach(file => {
+                const url = URL.createObjectURL(file);
+                new THREE.TextureLoader().load(url, (tex) => {
+                    const plane = new THREE.Mesh(
+                        new THREE.PlaneGeometry(1.6, 1.6), 
+                        new THREE.MeshBasicMaterial({ map: tex, side: 2, transparent: true })
+                    );
+                    plane.userData.closePos = new THREE.Vector3((Math.random()-0.5)*3.5, Math.random()*5-2.5, (Math.random()-0.5)*3.5);
+                    plane.userData.openPos = new THREE.Vector3((Math.random()-0.5)*14, (Math.random()-0.5)*14, (Math.random()-0.5)*14);
+                    plane.position.copy(plane.userData.closePos);
+                    particles.push(plane); scene.add(plane);
+                });
+            });
+        });
+
+        function tick() {
+            requestAnimationFrame(tick);
+            if(curState === 'CLOSE') scene.rotation.y += 0.006;
+            composer.render();
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        initApp();
+    </script>
+</body>
+</html>
